@@ -119,3 +119,83 @@ func TestCompact(t *testing.T) {
 		t.Fatalf("deleted key after reopen: %v", err)
 	}
 }
+
+func TestRecoverTruncatedFinalHeader(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Set("safe", "value"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, writeErr := f.Write([]byte{1, 2, 3})
+	closeErr := f.Close()
+	if writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	if closeErr != nil {
+		t.Fatal(closeErr)
+	}
+
+	s, err = Open(path)
+	if err != nil {
+		t.Fatalf("recover truncated header: %v", err)
+	}
+	defer s.Close()
+
+	if got, err := s.Get("safe"); err != nil || got != "value" {
+		t.Fatalf("recovered value = %q, %v", got, err)
+	}
+}
+
+func TestRecoverTruncatedFinalPayload(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Set("safe", "value"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Append a set record claiming a 5-byte key and 5-byte value,
+	// but write only part of its payload.
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	torn := []byte{1, 5, 0, 0, 0, 5, 0, 0, 0, 'b', 'r'}
+	_, writeErr := f.Write(torn)
+	closeErr := f.Close()
+	if writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	if closeErr != nil {
+		t.Fatal(closeErr)
+	}
+
+	s, err = Open(path)
+	if err != nil {
+		t.Fatalf("recover truncated payload: %v", err)
+	}
+	defer s.Close()
+
+	if got, err := s.Get("safe"); err != nil || got != "value" {
+		t.Fatalf("recovered value = %q, %v", got, err)
+	}
+	if _, err := s.Get("br"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("partial record must not be indexed: %v", err)
+	}
+}

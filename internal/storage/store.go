@@ -59,9 +59,14 @@ func (s *Store) recover() error {
 	header := make([]byte, headerSize)
 
 	for offset < size {
+		// An incomplete header at EOF is a torn final write.
 		if size-offset < headerSize {
-			return fmt.Errorf("incomplete record header at offset %d", offset)
+			if err := s.file.Truncate(offset); err != nil {
+				return fmt.Errorf("truncate incomplete header: %w", err)
+			}
+			break
 		}
+
 		if _, err := s.file.ReadAt(header, offset); err != nil {
 			return err
 		}
@@ -82,7 +87,11 @@ func (s *Store) recover() error {
 
 		recordSize := int64(headerSize) + int64(keySize) + int64(valueSize)
 		if recordSize > size-offset {
-			return fmt.Errorf("incomplete record at offset %d", offset)
+			// Valid-looking record header, but payload is incomplete at EOF.
+			if err := s.file.Truncate(offset); err != nil {
+				return fmt.Errorf("truncate incomplete record: %w", err)
+			}
+			break
 		}
 
 		keyBytes := make([]byte, int(keySize))
@@ -99,6 +108,7 @@ func (s *Store) recover() error {
 		}
 		offset += recordSize
 	}
+
 	_, err = s.file.Seek(0, io.SeekEnd)
 	return err
 }
