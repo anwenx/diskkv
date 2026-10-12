@@ -1,6 +1,12 @@
 # Local database files
 *.db
 *.db-*
+.diskkv-compact-*
 
 # Local build binary
 /diskkv
+
+# Test and profiling artifacts
+*.test
+*.prof
+*.out
