@@ -13,58 +13,51 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  diskkv set <key> <value>")
 	fmt.Fprintln(os.Stderr, "  diskkv get <key>")
 	fmt.Fprintln(os.Stderr, "  diskkv delete <key>")
+	fmt.Fprintln(os.Stderr, "  diskkv compact")
 }
 
 func main() {
-	if len(os.Args) < 3 {
+	if len(os.Args) < 2 {
+		usage()
+		os.Exit(2)
+	}
+	cmd := os.Args[1]
+	need := map[string]int{"set": 4, "get": 3, "delete": 3, "compact": 2}
+	if expected, ok := need[cmd]; !ok || len(os.Args) != expected {
 		usage()
 		os.Exit(2)
 	}
 
-	store, err := storage.Open("diskkv.db")
+	s, err := storage.Open("diskkv.db")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "open:", err)
 		os.Exit(1)
 	}
-	defer store.Close()
+	defer s.Close()
 
-	switch os.Args[1] {
+	switch cmd {
 	case "set":
-		if len(os.Args) != 4 {
-			usage()
-			os.Exit(2)
-		}
-		err = store.Set(os.Args[2], os.Args[3])
+		err = s.Set(os.Args[2], os.Args[3])
 		if err == nil {
 			fmt.Println("OK")
 		}
-
 	case "get":
-		if len(os.Args) != 3 {
-			usage()
-			os.Exit(2)
-		}
 		var value string
-		value, err = store.Get(os.Args[2])
+		value, err = s.Get(os.Args[2])
 		if err == nil {
 			fmt.Println(value)
 		}
-
 	case "delete":
-		if len(os.Args) != 3 {
-			usage()
-			os.Exit(2)
-		}
-		err = store.Delete(os.Args[2])
+		err = s.Delete(os.Args[2])
 		if err == nil {
 			fmt.Println("OK")
 		}
-
-	default:
-		usage()
-		os.Exit(2)
+	case "compact":
+		err = s.Compact()
+		if err == nil {
+			fmt.Println("Compacted")
+		}
 	}
-
 	if errors.Is(err, storage.ErrNotFound) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

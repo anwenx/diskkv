@@ -6,15 +6,16 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"sort"
 	"sync"
 )
 
-const headerSize = 9
-
 const (
-	recordSet    byte = 1
-	recordDelete byte = 2
-	maxFieldSize      = 64 << 20 // 64 MiB
+	headerSize   = 9
+	recordSet    = byte(1)
+	recordDelete = byte(2)
+	maxFieldSize = 64 << 20
 )
 
 var (
@@ -34,23 +35,17 @@ type Store struct {
 	closed bool
 }
 
-// Open opens or creates a database and rebuilds its index from disk.
 func Open(path string) (*Store, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 
-	s := &Store{
-		file:  f,
-		index: make(map[string]entry),
-	}
-
+	s := &Store{file: f, index: make(map[string]entry)}
 	if err := s.recover(); err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, fmt.Errorf("recover database: %w", err)
 	}
-
 	return s, nil
 }
 
@@ -59,16 +54,14 @@ func (s *Store) recover() error {
 	if err != nil {
 		return err
 	}
-
-	var offset int64
 	size := info.Size()
+	var offset int64
 	header := make([]byte, headerSize)
 
 	for offset < size {
 		if size-offset < headerSize {
 			return fmt.Errorf("incomplete record header at offset %d", offset)
 		}
-
 		if _, err := s.file.ReadAt(header, offset); err != nil {
 			return err
 		}
@@ -97,20 +90,15 @@ func (s *Store) recover() error {
 			return err
 		}
 		key := string(keyBytes)
-
 		valueOffset := offset + headerSize + int64(keySize)
+
 		if kind == recordDelete {
 			delete(s.index, key)
 		} else {
-			s.index[key] = entry{
-				valueOffset: valueOffset,
-				valueSize:   valueSize,
-			}
+			s.index[key] = entry{valueOffset: valueOffset, valueSize: valueSize}
 		}
-
 		offset += recordSize
 	}
-
 	_, err = s.file.Seek(0, io.SeekEnd)
 	return err
 }
@@ -160,22 +148,18 @@ func (s *Store) appendRecord(kind byte, key, value string) error {
 	return nil
 }
 
-// Set stores a value. A later Set for the same key replaces its visible value.
 func (s *Store) Set(key, value string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
 	if s.closed {
 		return ErrClosed
 	}
 	return s.appendRecord(recordSet, key, value)
 }
 
-// Get returns the latest value for a key.
 func (s *Store) Get(key string) (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
 	if s.closed {
 		return "", ErrClosed
 	}
@@ -184,7 +168,6 @@ func (s *Store) Get(key string) (string, error) {
 	if !ok {
 		return "", ErrNotFound
 	}
-
 	value := make([]byte, int(e.valueSize))
 	if len(value) > 0 {
 		if _, err := s.file.ReadAt(value, e.valueOffset); err != nil {
@@ -194,11 +177,9 @@ func (s *Store) Get(key string) (string, error) {
 	return string(value), nil
 }
 
-// Delete removes a key logically by appending a tombstone record.
 func (s *Store) Delete(key string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
 	if s.closed {
 		return ErrClosed
 	}
@@ -208,11 +189,109 @@ func (s *Store) Delete(key string) error {
 	return s.appendRecord(recordDelete, key, "")
 }
 
-// Close closes the database.
+// Compact rewrites only the latest live values into a temporary file.
+func (s *Store) Compact() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return ErrClosed
+	}
+
+	oldFile := s.file
+	path := oldFile.Name()
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".diskkv-compact-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	replaced := false
+	defer func() {
+		if tmp != nil {
+			_ = tmp.Close()
+		}
+		if !replaced {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	keys := make([]string, 0, len(s.index))
+	for key := range s.index {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	newIndex := make(map[string]entry, len(s.index))
+	var offset int64
+	for _, key := range keys {
+		e := s.index[key]
+		value := make([]byte, int(e.valueSize))
+		if len(value) > 0 {
+			if _, err := oldFile.ReadAt(value, e.valueOffset); err != nil {
+				return err
+			}
+		}
+
+		header := make([]byte, headerSize)
+		header[0] = recordSet
+		binary.LittleEndian.PutUint32(header[1:5], uint32(len(key)))
+		binary.LittleEndian.PutUint32(header[5:9], uint32(len(value)))
+
+		record := make([]byte, 0, headerSize+len(key)+len(value))
+		record = append(record, header...)
+		record = append(record, key...)
+		record = append(record, value...)
+
+		n, err := tmp.Write(record)
+		if err != nil {
+			return err
+		}
+		if n != len(record) {
+			return io.ErrShortWrite
+		}
+		newIndex[key] = entry{
+			valueOffset: offset + headerSize + int64(len(key)),
+			valueSize:   uint32(len(value)),
+		}
+		offset += int64(len(record))
+	}
+
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		tmp = nil
+		return err
+	}
+	tmp = nil
+
+	if err := oldFile.Close(); err != nil {
+		s.closed = true
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		reopened, openErr := os.OpenFile(path, os.O_RDWR|os.O_APPEND, 0600)
+		if openErr != nil {
+			s.closed = true
+			return fmt.Errorf("replace failed: %v; reopen failed: %w", err, openErr)
+		}
+		s.file = reopened
+		return err
+	}
+	replaced = true
+
+	newFile, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND, 0600)
+	if err != nil {
+		s.closed = true
+		return err
+	}
+	s.file = newFile
+	s.index = newIndex
+	return nil
+}
+
 func (s *Store) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
 	if s.closed {
 		return nil
 	}
