@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -197,5 +198,46 @@ func TestRecoverTruncatedFinalPayload(t *testing.T) {
 	}
 	if _, err := s.Get("br"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("partial record must not be indexed: %v", err)
+	}
+}
+func TestOpenDetectsChecksumCorruption(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "corrupt.db")
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Set("hello", "world"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Corrupt a byte in the stored key.
+	f, err := os.OpenFile(path, os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The V2 header is 9 bytes, so byte 9 is the first key byte.
+	if _, err := f.WriteAt([]byte{'j'}, 9); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Open(path)
+	if err == nil {
+		t.Fatal("expected checksum corruption to be detected")
+	}
+
+	if !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("expected checksum mismatch error, got: %v", err)
 	}
 }
