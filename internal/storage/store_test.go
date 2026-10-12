@@ -241,3 +241,66 @@ func TestOpenDetectsChecksumCorruption(t *testing.T) {
 		t.Fatalf("expected checksum mismatch error, got: %v", err)
 	}
 }
+
+func TestCompactEmptyDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "empty.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	if err := s.Compact(); err != nil {
+		t.Fatalf("Compact empty database: %v", err)
+	}
+
+	if got, err := s.Get("missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Get missing key after compact: got %q, err %v", got, err)
+	}
+}
+
+func TestCompactPreservesEmptyValuesAndRepeatedCompaction(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	if err := s.Set("empty", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Set("value", "first"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Set("value", "latest"); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 2; i++ {
+		if err := s.Compact(); err != nil {
+			t.Fatalf("Compact #%d: %v", i+1, err)
+		}
+	}
+
+	if got, err := s.Get("empty"); err != nil || got != "" {
+		t.Fatalf("empty value after compaction: got %q, err %v", got, err)
+	}
+	if got, err := s.Get("value"); err != nil || got != "latest" {
+		t.Fatalf("latest value after compaction: got %q, err %v", got, err)
+	}
+}
+
+func TestCompactAfterClose(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "data.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Compact(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Compact after Close: got %v, want %v", err, ErrClosed)
+	}
+}
