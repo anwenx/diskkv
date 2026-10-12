@@ -1,0 +1,3 @@
+# Local database files
+*.db
+*.db-*
